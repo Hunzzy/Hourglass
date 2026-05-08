@@ -1,21 +1,18 @@
 /*
  * ============================================================
  *  Digitale Sanduhr — ESP32-C3 Mini (CodeCell)
+ *  Bibliotheken NUR aus dem Arduino Library Manager
  * ============================================================
  *
- *  BAUTEILE
+ *  BENÖTIGTE BIBLIOTHEKEN (Sketch → Bibliotheken → Verwalten):
  *  ─────────────────────────────────────────────────────────
- *  • CodeCell ESP32-C3 Mini 1
- *      – eingebauter Motion-Sensor BNO085 (I2C, intern)
- *  • 2× 8×8 LED-Matrix mit MAX7219 (daisy-chained)
- *  • TM1637 4-Digit 7-Segment Display (MM:SS)
- *  • Potentiometer (3-Pin)
- *  • Taster (2-Pin, Momentary)
- *  • Aktives Buzzer-Modul (3-Pin: VCC · GND · I/O)
+ *  • "MD_MAX72XX"     von MajicDesigns   → MAX7219 LED-Matrizen
+ *  • "TM1637Display"  von Avishay Orpaz  → 4-Digit 7-Segment
+ *  • "CodeCell"       von Microbots      → ESP32-C3 + BNO085
  *
  *  VERDRAHTUNG
  *  ─────────────────────────────────────────────────────────
- *  LED-Matrizen (daisy-chained):
+ *  LED-Matrizen (daisy-chained, 2× MAX7219):
  *    G7        → DIN   (1. Display)
  *    G5        → CLK
  *    G6        → CS
@@ -29,21 +26,25 @@
  *    3.3V → VCC
  *    GND  → GND
  *
- *  Potentiometer:
+ *  Potentiometer (3-Pin):
  *    Pin 1 (links)  → 3.3V
  *    Pin 2 (Mitte)  → G1   (ADC)
  *    Pin 3 (rechts) → GND
  *
- *  Taster:
+ *  Taster (2-Pin):
  *    Pin A → G2
- *    Pin B → GND
- *    (interner Pull-up aktiv, kein externer Widerstand nötig)
+ *    Pin B → GND   (interner Pull-up, kein Widerstand nötig)
  *
  *  Buzzer-Modul (aktiv, 3-Pin):
  *    VCC → 3.3V
  *    GND → GND
- *    I/O → G3
- *    (HIGH = Ton AN, LOW = Ton AUS)
+ *    I/O → G3      (HIGH = Ton AN)
+ *
+ *  HINWEIS ZUM HARDWARE-TYPE:
+ *  ─────────────────────────────────────────────────────────
+ *  MD_MAX72XX braucht den richtigen Hardware-Typ deines Moduls.
+ *  Die meisten günstigen 8×8 Module aus dem Internet sind FC16_HW.
+ *  Falls die Anzeige gespiegelt/gedreht ist → GENERIC_HW probieren.
  *
  *  FUNKTIONSWEISE
  *  ─────────────────────────────────────────────────────────
@@ -53,105 +54,172 @@
  *  • Taster ≥2s halten    → Countdown abbrechen
  *  • Sand-Animation auf den LED-Matrizen
  *  • BNO085 erkennt Umdrehung → Sanduhr dreht sich um
- *  • Nach Ablauf: Buzzer-Signal, dann Taster drücken → Reset
+ *  • Nach Ablauf: Buzzer-Signal, Taster drücken → Reset
  * ============================================================
  */
 
-#include "LedControl.h"
-#include "Delay.h"
-#include <CodeCell.h>        // CodeCell-Bibliothek (BNO085)
-#include <TM1637Display.h>   // 4-Digit 7-Segment Display
+#include <MD_MAX72xx.h>
+#include <TM1637Display.h>
+#include <CodeCell.h>
+
+// ── Hardware-Typ ──────────────────────────────────────────────────────────────
+// FC16_HW   → die meisten günstigen Module (Standard)
+// GENERIC_HW → alternative falls gespiegelt/gedreht
+#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
 
 // ── Pin-Definitionen ──────────────────────────────────────────────────────────
-#define PIN_DIN     7    // MAX7219 Data
-#define PIN_CLK     5    // MAX7219 Clock
-#define PIN_CS      6    // MAX7219 Chip-Select
+#define PIN_DIN      7
+#define PIN_CLK      5
+#define PIN_CS       6
 
-#define PIN_POT     1    // Potentiometer (ADC, 0–3.3V)
-#define PIN_BUTTON  2    // Taster (aktiv LOW, Pull-up intern)
-#define PIN_BUZZER  3    // Aktives Buzzer-Modul I/O (HIGH = AN)
+#define PIN_POT      1    // Potentiometer (ADC)
+#define PIN_BUTTON   2    // Taster (aktiv LOW)
+#define PIN_BUZZER   3    // Aktives Buzzer-Modul (HIGH = AN)
 
-#define PIN_TM_CLK  8    // TM1637 CLK
-#define PIN_TM_DIO  9    // TM1637 DIO
+#define PIN_TM_CLK   8
+#define PIN_TM_DIO   9
 
 // ── Konstanten ────────────────────────────────────────────────────────────────
-#define MATRIX_TOP_DEFAULT     0     // Adresse obere Matrix beim Start
-#define MATRIX_BOTTOM_DEFAULT  1     // Adresse untere Matrix beim Start
-#define MAX_GRAINS             60    // Sandkörner gesamt
-#define GRAVITY_THRESHOLD      4.5f  // m/s² – Schwellenwert Umdrehungserkennung
-#define LONG_PRESS_MS          2000  // ms für langen Tasterdruck (Abbruch)
-#define ANIM_DELAY_MS          30    // ms pro Animations-Frame
-#define BEEP_ON_MS             150   // ms Buzzer AN pro Piep
-#define BEEP_OFF_MS            150   // ms Pause zwischen Pieptönen
-#define REPEAT_BEEP_INTERVAL   5000  // ms zwischen Wiederholungs-Beeps im FINISHED
+#define NUM_DEVICES       2      // Anzahl MAX7219 Module
+#define MATRIX_TOP        0      // Adresse obere Matrix (MD_MAX72XX zählt von rechts)
+#define MATRIX_BOTTOM     1      // Adresse untere Matrix
+#define MAX_GRAINS        60     // Sandkörner gesamt
+#define GRAVITY_THR       4.5f   // m/s² Schwellenwert Umdrehung
+#define LONG_PRESS_MS     2000   // ms für langen Tasterdruck (Abbruch)
+#define ANIM_DELAY_MS     30     // ms pro Animations-Frame
+#define BEEP_ON_MS        150    // ms Buzzer AN
+#define BEEP_OFF_MS       150    // ms Pause zwischen Pieptönen
+#define REPEAT_BEEP_MS    5000   // ms zwischen Wiederholungs-Beeps (FINISHED)
 
 // ── Objekte ───────────────────────────────────────────────────────────────────
-LedControl    lc(PIN_DIN, PIN_CLK, PIN_CS, 2);
-NonBlockDelay grainTimer;
-NonBlockDelay displayTimer;
-NonBlockDelay buzzerTimer;
-CodeCell      myCodeCell;
+MD_MAX72XX mx(HARDWARE_TYPE, PIN_DIN, PIN_CLK, PIN_CS, NUM_DEVICES);
 TM1637Display tm(PIN_TM_CLK, PIN_TM_DIO);
+CodeCell myCodeCell;
+
+// ── Pixel-Zustandsspeicher (8×8 pro Matrix, 2 Matrizen) ─────────────────────
+// mx.getPoint() ist langsam → eigene bool-Arrays als Cache
+bool grid[NUM_DEVICES][8][8];  // grid[device][col][row]  col/row = 0..7
 
 // ── Zustands-Maschine ─────────────────────────────────────────────────────────
 enum State { SETTING, RUNNING, FINISHED };
 State state = SETTING;
 
 // ── Variablen ─────────────────────────────────────────────────────────────────
-int  topMatrix     = MATRIX_TOP_DEFAULT;
-int  bottomMatrix  = MATRIX_BOTTOM_DEFAULT;
+int  topDev        = MATRIX_TOP;
+int  botDev        = MATRIX_BOTTOM;
 int  setMinutes    = 5;
-long totalSeconds  = 0;
-long remainSeconds = 0;
+long totalSec      = 0;
+long remainSec     = 0;
 int  grainsMoved   = 0;
 long grainInterval = 1000;
 
-bool          btnWasDown     = false;
-unsigned long btnPressStart  = 0;
+// Taster
+bool          btnWasDown    = false;
+unsigned long btnPressStart = 0;
 
-int           beepTotal      = 0;
-int           beepDone       = 0;
-bool          buzzerIsOn     = false;
-unsigned long lastRepeatBeep = 0;
+// Buzzer (non-blocking)
+int           beepTotal     = 0;
+int           beepDone      = 0;
+bool          buzzerIsOn    = false;
+unsigned long buzzerUntil   = 0;
+unsigned long lastRepeatBeep= 0;
+
+// Timing (ersetzt Delay.h komplett mit millis())
+unsigned long grainNextMs   = 0;
+unsigned long displayNextMs = 0;
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  BUZZER — non-blocking (aktives Modul: HIGH = AN)
+//  PIXEL-CACHE HILFSFUNKTIONEN
+//  MD_MAX72XX verwendet col 0..7, row 0..7
+//  col = x (links→rechts), row = y (oben→unten)
 // ═════════════════════════════════════════════════════════════════════════════
 
-void startBeep(int times) {
-  beepTotal  = times;
-  beepDone   = 1;
-  buzzerIsOn = true;
-  digitalWrite(PIN_BUZZER, HIGH);
-  buzzerTimer.Delay(BEEP_ON_MS);
+bool getPixel(int dev, int col, int row) {
+  return grid[dev][col][row];
 }
 
-void updateBuzzer() {
-  if (beepTotal == 0) return;
-  if (!buzzerTimer.Timeout()) return;
+void setPixel(int dev, int col, int row, bool on) {
+  grid[dev][col][row] = on;
+  mx.setPoint(row, dev * 8 + col, on);  // MD_MAX72XX: globale Spalte
+}
 
-  if (buzzerIsOn) {
-    digitalWrite(PIN_BUZZER, LOW);
-    buzzerIsOn = false;
-    if (beepDone >= beepTotal) {
-      beepTotal = 0;
-      return;
+void clearGrid(int dev) {
+  for (int c = 0; c < 8; c++)
+    for (int r = 0; r < 8; r++)
+      setPixel(dev, c, r, false);
+}
+
+void clearAllGrids() {
+  mx.clear();
+  memset(grid, 0, sizeof(grid));
+}
+
+// Füllt eine Matrix mit n Körnern (zeilenweise von oben links → unten rechts)
+void fillGrid(int dev, int grains) {
+  clearGrid(dev);
+  int count = 0;
+  for (int r = 0; r < 8 && count < grains; r++)
+    for (int c = 0; c < 8 && count < grains; c++) {
+      setPixel(dev, c, r, true);
+      count++;
     }
-    buzzerTimer.Delay(BEEP_OFF_MS);
-  } else {
-    digitalWrite(PIN_BUZZER, HIGH);
-    buzzerIsOn = true;
-    beepDone++;
-    buzzerTimer.Delay(BEEP_ON_MS);
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SAND-PHYSIK
+//  Körner fallen nach unten (row++ = nach unten)
+//  Bei Blockierung: zufällig nach links oder rechts ausweichen
+// ═════════════════════════════════════════════════════════════════════════════
+
+void updateParticles(int dev) {
+  // Von unten nach oben scannen damit Körner korrekt kaskadieren
+  for (int r = 6; r >= 0; r--) {
+    for (int c = 0; c < 8; c++) {
+      if (!getPixel(dev, c, r)) continue;
+
+      bool canDown  = !getPixel(dev, c,     r + 1);
+      bool canLeft  = (c > 0) && !getPixel(dev, c - 1, r + 1);
+      bool canRight = (c < 7) && !getPixel(dev, c + 1, r + 1);
+
+      if (canDown) {
+        setPixel(dev, c, r,     false);
+        setPixel(dev, c, r + 1, true);
+      } else if (canLeft && !canRight) {
+        setPixel(dev, c,     r, false);
+        setPixel(dev, c - 1, r + 1, true);
+      } else if (canRight && !canLeft) {
+        setPixel(dev, c,     r, false);
+        setPixel(dev, c + 1, r + 1, true);
+      } else if (canLeft && canRight) {
+        bool goRight = ((millis() / 10 + c + r) % 2 == 0);
+        setPixel(dev, c,              r, false);
+        setPixel(dev, goRight ? c+1 : c-1, r + 1, true);
+      }
+    }
   }
 }
 
-void stopBuzzer() {
-  beepTotal  = 0;
-  beepDone   = 0;
-  buzzerIsOn = false;
-  digitalWrite(PIN_BUZZER, LOW);
+// Überträgt ein Korn von topDev (unterste Zeile) nach botDev (oberste Zeile)
+bool transferGrain() {
+  // Suche das unterste-rechteste Pixel in der oberen Matrix
+  for (int r = 7; r >= 0; r--) {
+    for (int c = 7; c >= 0; c--) {
+      if (!getPixel(topDev, c, r)) continue;
+      setPixel(topDev, c, r, false);
+      // Platziere mittig oben in der unteren Matrix
+      int order[] = {3, 4, 2, 5, 1, 6, 0, 7};
+      for (int i = 0; i < 8; i++) {
+        if (!getPixel(botDev, order[i], 0)) {
+          setPixel(botDev, order[i], 0, true);
+          return true;
+        }
+      }
+      return true;
+    }
+  }
+  return false;
 }
 
 
@@ -173,85 +241,55 @@ void readPotentiometer() {
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  LED-MATRIX
+//  BUZZER — non-blocking (aktiv: HIGH = AN)
 // ═════════════════════════════════════════════════════════════════════════════
 
-void fillMatrix(int addr, int grains) {
-  lc.clearDisplay(addr);
-  int count = 0;
-  for (int y = 0; y < 8 && count < grains; y++)
-    for (int x = 0; x < 8 && count < grains; x++) {
-      lc.setRawXY(addr, x, y, true);
-      count++;
-    }
+void startBeep(int times) {
+  beepTotal  = times;
+  beepDone   = 1;
+  buzzerIsOn = true;
+  digitalWrite(PIN_BUZZER, HIGH);
+  buzzerUntil = millis() + BEEP_ON_MS;
 }
 
-// Sand-Physik: Körner fallen nach unten, weichen nach links/rechts aus
-void updateParticles(int addr) {
-  for (int y = 6; y >= 0; y--) {
-    for (int x = 0; x < 8; x++) {
-      if (!lc.getRawXY(addr, x, y)) continue;
-
-      bool canDown  = !lc.getRawXY(addr, x, y + 1);
-      bool canLeft  = (x > 0) && !lc.getRawXY(addr, x - 1, y + 1);
-      bool canRight = (x < 7) && !lc.getRawXY(addr, x + 1, y + 1);
-
-      if (canDown) {
-        lc.setRawXY(addr, x, y,     false);
-        lc.setRawXY(addr, x, y + 1, true);
-      } else if (canLeft && !canRight) {
-        lc.setRawXY(addr, x,     y,     false);
-        lc.setRawXY(addr, x - 1, y + 1, true);
-      } else if (canRight && !canLeft) {
-        lc.setRawXY(addr, x,     y,     false);
-        lc.setRawXY(addr, x + 1, y + 1, true);
-      } else if (canLeft && canRight) {
-        // Beide Seiten frei → zufällig wählen für natürliches Verhalten
-        bool goRight = ((millis() / 10 + x + y) % 2 == 0);
-        lc.setRawXY(addr, x,              y,     false);
-        lc.setRawXY(addr, goRight ? x+1 : x-1, y + 1, true);
-      }
-    }
-  }
+void stopBuzzer() {
+  beepTotal = 0;
+  buzzerIsOn = false;
+  digitalWrite(PIN_BUZZER, LOW);
 }
 
-// Überträgt ein Korn aus der oberen in die untere Matrix (Hals)
-bool transferGrain() {
-  for (int y = 7; y >= 0; y--) {
-    for (int x = 7; x >= 0; x--) {
-      if (!lc.getRawXY(topMatrix, x, y)) continue;
-      lc.setRawXY(topMatrix, x, y, false);
-      // In Mitte oben der unteren Matrix einlegen
-      int startX[] = {3, 4, 2, 5, 1, 6, 0, 7};
-      for (int i = 0; i < 8; i++) {
-        if (!lc.getRawXY(bottomMatrix, startX[i], 0)) {
-          lc.setRawXY(bottomMatrix, startX[i], 0, true);
-          return true;
-        }
-      }
-      return true;
-    }
+void updateBuzzer() {
+  if (beepTotal == 0) return;
+  if (millis() < buzzerUntil) return;
+
+  if (buzzerIsOn) {
+    digitalWrite(PIN_BUZZER, LOW);
+    buzzerIsOn = false;
+    if (beepDone >= beepTotal) { beepTotal = 0; return; }
+    buzzerUntil = millis() + BEEP_OFF_MS;
+  } else {
+    digitalWrite(PIN_BUZZER, HIGH);
+    buzzerIsOn = true;
+    beepDone++;
+    buzzerUntil = millis() + BEEP_ON_MS;
   }
-  return false;
 }
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ORIENTIERUNG (BNO085)
+//  ORIENTIERUNG — BNO085 via CodeCell
 // ═════════════════════════════════════════════════════════════════════════════
 
 void checkOrientation() {
   float ax, ay, az;
-  myCodeCell.Motion_AccelerometerRead(ax, ay, az);  // Korrekter CodeCell API-Name
+  myCodeCell.Motion_AccelerometerRead(ax, ay, az);
 
-  if (ay > GRAVITY_THRESHOLD) {
-    topMatrix    = MATRIX_TOP_DEFAULT;
-    bottomMatrix = MATRIX_BOTTOM_DEFAULT;
-    lc.setRotation(0);
-  } else if (ay < -GRAVITY_THRESHOLD) {
-    topMatrix    = MATRIX_BOTTOM_DEFAULT;
-    bottomMatrix = MATRIX_TOP_DEFAULT;
-    lc.setRotation(180);
+  if (ay > GRAVITY_THR) {
+    topDev = MATRIX_TOP;
+    botDev = MATRIX_BOTTOM;
+  } else if (ay < -GRAVITY_THR) {
+    topDev = MATRIX_BOTTOM;
+    botDev = MATRIX_TOP;
   }
 }
 
@@ -261,32 +299,27 @@ void checkOrientation() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void startCountdown() {
-  totalSeconds  = (long)setMinutes * 60L;
-  remainSeconds = totalSeconds;
-  grainsMoved   = 0;
-  grainInterval = (totalSeconds * 1000L) / MAX_GRAINS;
+  totalSec     = (long)setMinutes * 60L;
+  remainSec    = totalSec;
+  grainsMoved  = 0;
+  grainInterval = (totalSec * 1000L) / MAX_GRAINS;
   if (grainInterval < 100) grainInterval = 100;
 
-  lc.clearDisplay(0);
-  lc.clearDisplay(1);
-  fillMatrix(topMatrix, MAX_GRAINS);
+  clearAllGrids();
+  fillGrid(topDev, MAX_GRAINS);
 
-  grainTimer.Delay(grainInterval);
-  displayTimer.Delay(1000);
+  grainNextMs   = millis() + grainInterval;
+  displayNextMs = millis() + 1000;
   state = RUNNING;
 
-  Serial.print("Start: ");
-  Serial.print(setMinutes);
-  Serial.print(" min | Korn-Takt: ");
-  Serial.print(grainInterval);
-  Serial.println(" ms");
+  Serial.print("Start: "); Serial.print(setMinutes);
+  Serial.print(" min | Korn alle "); Serial.print(grainInterval); Serial.println(" ms");
 }
 
 void resetToSetting() {
   state = SETTING;
   stopBuzzer();
-  lc.clearDisplay(0);
-  lc.clearDisplay(1);
+  clearAllGrids();
   readPotentiometer();
   showTime((long)setMinutes * 60L);
   Serial.println("Reset → Einstellmodus");
@@ -302,27 +335,29 @@ void setup() {
   delay(300);
   Serial.println("=== Digitale Sanduhr ===");
 
+  // CodeCell (BNO085)
   myCodeCell.Init(MOTION_ACCELEROMETER);
 
+  // Pins
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_BUZZER, OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);
   analogReadResolution(12);
 
+  // TM1637
   tm.setBrightness(5);
 
-  for (int i = 0; i < 2; i++) {
-    lc.shutdown(i, false);
-    lc.setIntensity(i, 4);
-    lc.clearDisplay(i);
-  }
-  lc.setRotation(0);
+  // MD_MAX72XX initialisieren
+  mx.begin();
+  mx.control(MD_MAX72XX::INTENSITY, 4);  // Helligkeit 0–15
+  mx.clear();
+  memset(grid, 0, sizeof(grid));
 
   readPotentiometer();
   showTime((long)setMinutes * 60L);
 
-  startBeep(1);   // Startton
-  Serial.println("Bereit.");
+  startBeep(1);
+  Serial.println("Bereit. Taster drücken.");
 }
 
 
@@ -332,17 +367,17 @@ void setup() {
 
 void loop() {
 
-  // CodeCell Run: liest Sensordaten (muss jeden Loop aufgerufen werden)
-  myCodeCell.Run(10);  // 10 Hz Sensor-Abtastrate
+  // CodeCell Sensor-Update (muss jeden Loop aufgerufen werden)
+  myCodeCell.Run(10);
 
-  // Non-blocking Buzzer
+  // Buzzer
   updateBuzzer();
 
   // ── Taster ────────────────────────────────────────────────────────────────
   bool btnDown = (digitalRead(PIN_BUTTON) == LOW);
 
   if (btnDown && !btnWasDown) {
-    btnWasDown   = true;
+    btnWasDown    = true;
     btnPressStart = millis();
   }
 
@@ -378,16 +413,19 @@ void loop() {
   // ── RUNNING ───────────────────────────────────────────────────────────────
   if (state == RUNNING) {
     checkOrientation();
-    updateParticles(topMatrix);
-    updateParticles(bottomMatrix);
 
-    if (grainTimer.Timeout() && grainsMoved < MAX_GRAINS) {
-      grainTimer.Delay(grainInterval);
+    // Sand-Physik
+    updateParticles(topDev);
+    updateParticles(botDev);
+
+    // Korn durch den Hals transferieren
+    if (millis() >= grainNextMs && grainsMoved < MAX_GRAINS) {
+      grainNextMs = millis() + grainInterval;
       if (transferGrain()) grainsMoved++;
 
       if (grainsMoved >= MAX_GRAINS) {
         state = FINISHED;
-        remainSeconds  = 0;
+        remainSec     = 0;
         lastRepeatBeep = millis();
         showTime(0);
         startBeep(5);
@@ -396,10 +434,11 @@ void loop() {
       }
     }
 
-    if (displayTimer.Timeout()) {
-      displayTimer.Delay(1000);
-      if (remainSeconds > 0) remainSeconds--;
-      showTime(remainSeconds);
+    // Countdown-Anzeige
+    if (millis() >= displayNextMs) {
+      displayNextMs = millis() + 1000;
+      if (remainSec > 0) remainSec--;
+      showTime(remainSec);
     }
 
     delay(ANIM_DELAY_MS);
@@ -408,7 +447,7 @@ void loop() {
 
   // ── FINISHED ──────────────────────────────────────────────────────────────
   if (state == FINISHED) {
-    if (millis() - lastRepeatBeep > REPEAT_BEEP_INTERVAL) {
+    if (millis() - lastRepeatBeep > REPEAT_BEEP_MS) {
       lastRepeatBeep = millis();
       startBeep(2);
     }
