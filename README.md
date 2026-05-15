@@ -64,5 +64,4 @@ Installiere die folgenden Bibliotheken direkt über den **Library Manager** (`We
 ## Bedienung
 1. **Einstellen:** Drehe am Potentiometer, um die gewünschte Zeit auf dem 7-Segment Display zu sehen.
 2. **Starten:** Drücke den Taster kurz. Der Sand beginnt in der oberen Matrix zu fallen.
-3. **Umdrehen:** Drehe das Gerät physikalisch um. Der Sand reagiert sofort auf die neue Gravitationsrichtung.
-4. **Abbrechen:** Halte den Taster für 2 Sekunden gedrückt, um zum Einstellmodus zurückzukehren.
+3. **Abbrechen:** Halte den Taster für 2 Sekunden gedrückt, um zum Einstellmodus zurückzukehren.
