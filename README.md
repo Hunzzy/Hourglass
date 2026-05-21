@@ -1,5 +1,8 @@
 # Digitale Sanduhr (ESP32-C3 CodeCell)
 
+![First Impression Image](repository_image.jpg)
+
+
 Dieses Projekt realisiert eine digitale Sanduhr mit realistischer Physik-Simulation und Gravitations-Erkennung. Mithilfe der **CodeCell (ESP32-C3 Mini)** und dem integrierten **BNO085 Bewegungssensor** erkennt die Sanduhr ihre Ausrichtung und lässt den "Sand" (LED-Punkte) immer nach unten fallen.
 
 ## Features
